@@ -525,6 +525,13 @@ async function upgrade() {
   // Step 5: Set hook script permissions — adapter-aware
   p.log.step("Setting hook script permissions...");
   const permSet = adapter.setHookPermissions(pluginRoot);
+  // Also ensure CLI binary is executable (tsc doesn't set +x)
+  const cliBin = resolve(pluginRoot, "build", "cli.js");
+  try {
+    accessSync(cliBin, constants.F_OK);
+    execSync(`chmod +x "${cliBin}"`, { stdio: "ignore" });
+    permSet.push(cliBin);
+  } catch { /* cli.js not found — skip */ }
   if (permSet.length > 0) {
     p.log.success(color.green("Permissions set") + color.dim(` — ${permSet.length} hook script(s)`));
     changes.push(`Set ${permSet.length} hook scripts as executable`);
