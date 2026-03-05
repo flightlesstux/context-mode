@@ -10,7 +10,7 @@
  * - null (passthrough)
  */
 
-import { ROUTING_BLOCK, READ_GUIDANCE, GREP_GUIDANCE } from "../routing-block.mjs";
+import { ROUTING_BLOCK, READ_GUIDANCE, GREP_GUIDANCE, BASH_GUIDANCE } from "../routing-block.mjs";
 
 // Try to import security module — may not exist
 let security = null;
@@ -24,11 +24,47 @@ export async function initSecurity(buildDir) {
 }
 
 /**
+ * Normalize platform-specific tool names to canonical (Claude Code) names.
+ *
+ * Evidence:
+ * - Gemini CLI: https://github.com/google-gemini/gemini-cli (run_shell_command, read_file, grep_search, web_fetch, activate_skill)
+ * - OpenCode:   https://github.com/opencode-ai/opencode (bash, view, grep, fetch, agent)
+ * - Codex CLI:  https://github.com/openai/codex (shell, read_file, grep_files, container.exec)
+ * - VS Code Copilot: tool names TBD — uses empty matcher until confirmed
+ */
+const TOOL_ALIASES = {
+  // Gemini CLI
+  "run_shell_command": "Bash",
+  "read_file": "Read",
+  "read_many_files": "Read",
+  "grep_search": "Grep",
+  "search_file_content": "Grep",
+  "web_fetch": "WebFetch",
+  "activate_skill": "Agent",
+  // OpenCode
+  "bash": "Bash",
+  "view": "Read",
+  "grep": "Grep",
+  "fetch": "WebFetch",
+  "agent": "Agent",
+  // Codex CLI
+  "shell": "Bash",
+  "shell_command": "Bash",
+  "exec_command": "Bash",
+  "container.exec": "Bash",
+  "local_shell": "Bash",
+  "grep_files": "Grep",
+};
+
+/**
  * Route a PreToolUse event. Returns normalized decision object or null for passthrough.
  */
 export function routePreToolUse(toolName, toolInput, projectDir) {
+  // Normalize platform-specific tool name to canonical
+  const canonical = TOOL_ALIASES[toolName] ?? toolName;
+
   // ─── Bash: Stage 1 security check, then Stage 2 routing ───
-  if (toolName === "Bash") {
+  if (canonical === "Bash") {
     const command = toolInput.command ?? "";
 
     // Stage 1: Security check against user's deny/allow patterns.
@@ -75,22 +111,22 @@ export function routePreToolUse(toolName, toolInput, projectDir) {
       };
     }
 
-    // allow all other Bash commands
-    return null;
+    // allow all other Bash commands, but inject routing nudge
+    return { action: "context", additionalContext: BASH_GUIDANCE };
   }
 
   // ─── Read: nudge toward execute_file ───
-  if (toolName === "Read") {
+  if (canonical === "Read") {
     return { action: "context", additionalContext: READ_GUIDANCE };
   }
 
   // ─── Grep: nudge toward execute ───
-  if (toolName === "Grep") {
+  if (canonical === "Grep") {
     return { action: "context", additionalContext: GREP_GUIDANCE };
   }
 
   // ─── WebFetch: deny + redirect to sandbox ───
-  if (toolName === "WebFetch") {
+  if (canonical === "WebFetch") {
     const url = toolInput.url ?? "";
     return {
       action: "deny",
@@ -99,7 +135,7 @@ export function routePreToolUse(toolName, toolInput, projectDir) {
   }
 
   // ─── Agent/Task: inject context-mode routing into subagent prompts ───
-  if (toolName === "Agent" || toolName === "Task") {
+  if (canonical === "Agent" || canonical === "Task") {
     const subagentType = toolInput.subagent_type ?? "";
     const prompt = toolInput.prompt ?? "";
 
