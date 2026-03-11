@@ -1188,6 +1188,109 @@ files.each { |_path, content| puts JSON.parse(content)["name"] }
     assert.equal(r.resolvedPaths!.length, 0);
   });
 
+  // ── B1: Path traversal ───────────────────────────────────────────────────
+
+  test("B1: path traversal via '../' in single-file path throws", async () => {
+    const sandboxRoot = join(testDir, "sandbox");
+    mkdirSync(sandboxRoot, { recursive: true });
+    const sandboxExecutor = new PolyglotExecutor({ runtimes, projectRoot: sandboxRoot });
+    await assert.rejects(
+      () => sandboxExecutor.executeFile({ path: "../../etc/passwd", language: "shell", code: "echo ok" }),
+      /escapes project root/,
+    );
+  });
+
+  test("B1: path traversal via '../' in paths array is silently skipped", async () => {
+    const sandboxRoot = join(testDir, "sandbox");
+    mkdirSync(sandboxRoot, { recursive: true });
+    const sandboxExecutor = new PolyglotExecutor({ runtimes, projectRoot: sandboxRoot });
+    const r = await sandboxExecutor.executeFile({
+      paths: ["../../etc/passwd"],
+      language: "shell",
+      code: `echo "count=$FILE_COUNT"`,
+    });
+    assert.ok(r.stdout.includes("count=0"), `Traversal path should be excluded, got: ${r.stdout}`);
+  });
+
+  test("B1: path traversal via '../' in dir is silently skipped", async () => {
+    const sandboxRoot = join(testDir, "sandbox");
+    mkdirSync(sandboxRoot, { recursive: true });
+    const sandboxExecutor = new PolyglotExecutor({ runtimes, projectRoot: sandboxRoot });
+    const r = await sandboxExecutor.executeFile({
+      dir: "../../etc",
+      language: "shell",
+      code: `echo "count=$FILE_COUNT"`,
+    });
+    assert.equal(r.resolvedPaths!.length, 0, "Traversal dir should yield no resolved paths");
+  });
+
+  // ── B2: Symlink traversal ────────────────────────────────────────────────
+
+  test("B2: symlinks in dir mode are skipped", async () => {
+    const { symlinkSync } = await import("node:fs");
+    const symlinkDir = join(testDir, "symlink-test");
+    mkdirSync(symlinkDir, { recursive: true });
+    writeFileSync(join(symlinkDir, "real.txt"), "real content", "utf-8");
+    try {
+      symlinkSync("/etc", join(symlinkDir, "evil-link"));
+    } catch {
+      // Skip on platforms that don't support symlinks
+      return;
+    }
+    const symlinkExecutor = new PolyglotExecutor({ runtimes, projectRoot: symlinkDir });
+    const r = await symlinkExecutor.executeFile({
+      dir: ".",
+      language: "shell",
+      code: `echo "count=$FILE_COUNT"`,
+    });
+    assert.ok(r.stdout.includes("count=1"), `Symlink should be skipped, got: ${r.stdout}`);
+  });
+
+  // ── B3: File count cap ───────────────────────────────────────────────────
+
+  test("B3: dir mode throws when file count exceeds 500", async () => {
+    const bigDir = join(testDir, "big-dir");
+    mkdirSync(bigDir, { recursive: true });
+    for (let i = 0; i < 501; i++) {
+      writeFileSync(join(bigDir, `file-${i}.txt`), `content ${i}`, "utf-8");
+    }
+    const bigExecutor = new PolyglotExecutor({ runtimes, projectRoot: bigDir });
+    await assert.rejects(
+      () => bigExecutor.executeFile({ dir: ".", language: "shell", code: "echo ok" }),
+      /exceeds the limit of 500/,
+    );
+  });
+
+  // ── B4: Mutual exclusivity ───────────────────────────────────────────────
+
+  test("B4: providing both path and paths throws", async () => {
+    await assert.rejects(
+      () => executor.executeFile({ path: fileA, paths: [fileB], language: "shell", code: "echo ok" }),
+      /Only one of/,
+    );
+  });
+
+  test("B4: providing both path and dir throws", async () => {
+    await assert.rejects(
+      () => executor.executeFile({ path: fileA, dir: testDir, language: "shell", code: "echo ok" }),
+      /Only one of/,
+    );
+  });
+
+  test("B4: providing both paths and dir throws", async () => {
+    await assert.rejects(
+      () => executor.executeFile({ paths: [fileA], dir: testDir, language: "shell", code: "echo ok" }),
+      /Only one of/,
+    );
+  });
+
+  test("B4: empty paths array throws", async () => {
+    await assert.rejects(
+      () => executor.executeFile({ paths: [], language: "shell", code: "echo ok" }),
+      /must contain at least one/,
+    );
+  });
+
   afterAll(() => {
     rmSync(testDir, { recursive: true, force: true });
   });

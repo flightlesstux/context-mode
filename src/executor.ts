@@ -1,6 +1,6 @@
 import { spawn, execSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync, statSync, readdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync, lstatSync, readdirSync } from "node:fs";
+import { join, resolve, sep, isAbsolute } from "node:path";
 import { tmpdir } from "node:os";
 import {
   detectRuntimes,
@@ -147,9 +147,25 @@ export class PolyglotExecutor {
   ): Promise<ExecResult & { resolvedPaths?: string[] }> {
     const { language, code, timeout = 30_000 } = opts;
 
+    // ── B4: Mutual exclusivity validation ──────────────────────────────────
+    const modeCount = [opts.path, opts.paths, opts.dir].filter(v => v !== undefined).length;
+    if (modeCount > 1) {
+      throw new Error("Only one of 'path', 'paths', or 'dir' may be provided at a time.");
+    }
+    if (opts.paths !== undefined && opts.paths.length === 0) {
+      throw new Error("'paths' must contain at least one file path.");
+    }
+
     // ── Single-file mode (existing behaviour) ──────────────────────────────
     if (opts.path) {
       const absolutePath = resolve(this.#projectRoot, opts.path);
+      // B1: block relative path traversal out of project root
+      if (!isAbsolute(opts.path)) {
+        const rootWithSep = this.#projectRoot.endsWith(sep) ? this.#projectRoot : this.#projectRoot + sep;
+        if (!absolutePath.startsWith(rootWithSep) && absolutePath !== this.#projectRoot) {
+          throw new Error(`Path escapes project root: ${opts.path}`);
+        }
+      }
       const wrappedCode = this.#wrapWithFileContent(absolutePath, language, code);
       return this.execute({ language, code: wrappedCode, timeout });
     }
@@ -169,6 +185,7 @@ export class PolyglotExecutor {
   }): { fileMap: Map<string, string>; resolvedPaths: string[] } {
     const MAX_FILE_BYTES = 100 * 1024;      // 100 KB per file
     const MAX_INJECT_BYTES = 1024 * 1024;   // 1 MB total injection budget
+    const MAX_FILE_COUNT = 500;             // B3: hard cap on number of files in dir mode
     const fileMap = new Map<string, string>();
     const resolvedPaths: string[] = [];
 
@@ -176,6 +193,11 @@ export class PolyglotExecutor {
       let totalBytes = 0;
       for (const p of opts.paths) {
         const abs = resolve(this.#projectRoot, p);
+        // B1: block relative path traversal out of project root
+        if (!isAbsolute(p)) {
+          const rootWithSep = this.#projectRoot.endsWith(sep) ? this.#projectRoot : this.#projectRoot + sep;
+          if (!abs.startsWith(rootWithSep) && abs !== this.#projectRoot) continue;
+        }
         let buf: Buffer;
         try { buf = readFileSync(abs); } catch { continue; }
         if (isBinary(buf)) continue;
@@ -188,21 +210,34 @@ export class PolyglotExecutor {
       }
     } else if (opts.dir) {
       const absDir = resolve(this.#projectRoot, opts.dir);
+      // B1: block relative path traversal out of project root
+      if (!isAbsolute(opts.dir)) {
+        const rootWithSep = this.#projectRoot.endsWith(sep) ? this.#projectRoot : this.#projectRoot + sep;
+        if (!absDir.startsWith(rootWithSep) && absDir !== this.#projectRoot) {
+          return { fileMap, resolvedPaths };
+        }
+      }
       const regex = opts.glob ? globToRegex(opts.glob) : null;
-      let entries: string[];
-      try {
-        entries = (readdirSync(absDir, { recursive: true }) as string[]).map(String);
-      } catch { return { fileMap, resolvedPaths }; }
+
+      // B2: safe recursion that never follows symlinks — collect rel paths up to limit+1
+      const relPaths = this.#safeReaddirFiles(absDir, MAX_FILE_COUNT + 1);
+
+      // B3: hard file count cap
+      if (relPaths.length > MAX_FILE_COUNT) {
+        throw new Error(
+          `Directory contains more than ${MAX_FILE_COUNT} files, which exceeds the limit of ${MAX_FILE_COUNT}. ` +
+          `Use the 'glob' option to narrow the selection (e.g. glob: "**/*.ts").`
+        );
+      }
 
       let totalBytes = 0;
-      for (const rel of entries.sort()) {
+      for (const rel of relPaths.sort()) {
         const abs = join(absDir, rel);
-        let stat;
-        try { stat = statSync(abs); } catch { continue; }
-        if (!stat.isFile()) continue;
         const relNorm = rel.replace(/\\/g, "/");
         if (regex && !regex.test(relNorm)) continue;
-        if (stat.size > MAX_FILE_BYTES) continue;
+        let lstat;
+        try { lstat = lstatSync(abs); } catch { continue; }
+        if (lstat.size > MAX_FILE_BYTES) continue;
         let buf: Buffer;
         try { buf = readFileSync(abs); } catch { continue; }
         if (isBinary(buf)) continue;
@@ -216,6 +251,31 @@ export class PolyglotExecutor {
     }
 
     return { fileMap, resolvedPaths };
+  }
+
+  /**
+   * Recursively list file paths under `dir` without following symlinks (B2).
+   * Stops collecting once `limit` files are reached to support B3 cap checks.
+   */
+  #safeReaddirFiles(dir: string, limit: number, base = ""): string[] {
+    const files: string[] = [];
+    let items: string[];
+    try { items = readdirSync(dir) as string[]; } catch { return files; }
+    for (const item of items) {
+      if (files.length >= limit) break;
+      const abs = join(dir, item);
+      const rel = base ? join(base, item) : item;
+      let lstat;
+      try { lstat = lstatSync(abs); } catch { continue; }
+      if (lstat.isSymbolicLink()) continue; // B2: skip symlinks
+      if (lstat.isDirectory()) {
+        const sub = this.#safeReaddirFiles(abs, limit - files.length, rel);
+        files.push(...sub);
+      } else if (lstat.isFile()) {
+        files.push(rel);
+      }
+    }
+    return files;
   }
 
   /**
