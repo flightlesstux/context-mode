@@ -1258,25 +1258,61 @@ server.registerTool(
       "Provide all commands to run and all queries to search — everything happens in one round trip.",
     inputSchema: z.object({
       commands: z
-        .array(
-          z.object({
-            label: z
-              .string()
-              .describe(
-                "Section header for this command's output (e.g., 'README', 'Package.json', 'Source Tree')",
-              ),
-            command: z
-              .string()
-              .describe("Shell command to execute"),
-          }),
+        .preprocess(
+          (val) => {
+            // Coerce JSON string → array
+            let arr = val;
+            if (typeof val === "string") {
+              try {
+                arr = JSON.parse(val);
+              } catch {
+                return val;
+              }
+            }
+            // Coerce array of plain strings → array of {label, command} objects
+            if (Array.isArray(arr)) {
+              return arr.map((item, i) =>
+                typeof item === "string"
+                  ? { label: `cmd ${i + 1}`, command: item }
+                  : item,
+              );
+            }
+            return arr;
+          },
+          z
+            .array(
+              z.object({
+                label: z
+                  .string()
+                  .describe(
+                    "Section header for this command's output (e.g., 'README', 'Package.json', 'Source Tree')",
+                  ),
+                command: z
+                  .string()
+                  .describe("Shell command to execute"),
+              }),
+            )
+            .min(1),
         )
-        .min(1)
         .describe(
           "Commands to execute as a batch. Each runs sequentially, output is labeled with the section header.",
         ),
       queries: z
-        .array(z.string())
-        .min(1)
+        .preprocess(
+          (val) => {
+            // Coerce JSON string → array, bare string → single-element array
+            if (typeof val === "string") {
+              try {
+                const parsed = JSON.parse(val);
+                return Array.isArray(parsed) ? parsed : [val];
+              } catch {
+                return [val];
+              }
+            }
+            return val;
+          },
+          z.array(z.string()).min(1),
+        )
         .describe(
           "Search queries to extract information from indexed output. Use 5-8 comprehensive queries. " +
           "Each returns top 5 matching sections with full content. " +
