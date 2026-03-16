@@ -23,12 +23,17 @@ interface HookResult {
   stderr: string;
 }
 
-function runHook(hookFile: string, input: Record<string, unknown>): HookResult {
+function runHook(hookFile: string, input: Record<string, unknown>, cwd?: string): HookResult {
   const result = spawnSync("node", [join(HOOKS_DIR, hookFile)], {
     input: JSON.stringify(input),
     encoding: "utf-8",
     timeout: 10000,
     env: { ...process.env },
+    // Set subprocess cwd so process.cwd() inside the hook resolves to an
+    // isolated directory. Kiro has no projectDirEnv so getSessionDBPath()
+    // falls back to process.cwd() — without this, all parallel test workers
+    // would write to the same SQLite file, causing SIGSEGV on macOS ARM64.
+    ...(cwd ? { cwd } : {}),
   });
 
   return {
@@ -115,11 +120,10 @@ describe("Kiro hooks", () => {
     test("exits 0 and produces no stdout (non-blocking)", () => {
       const result = runHook("posttooluse.mjs", {
         hook_event_name: "postToolUse",
-        cwd: tempDir,
         tool_name: "fs_read",
         tool_input: { path: "/src/app.ts" },
         tool_response: "export default {}",
-      });
+      }, tempDir);
 
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toBe("");
@@ -128,11 +132,10 @@ describe("Kiro hooks", () => {
     test("captures git events without error", () => {
       const result = runHook("posttooluse.mjs", {
         hook_event_name: "postToolUse",
-        cwd: tempDir,
         tool_name: "execute_bash",
         tool_input: { command: "git status" },
         tool_response: "On branch main\nnothing to commit",
-      });
+      }, tempDir);
 
       expect(result.exitCode).toBe(0);
     });
@@ -140,7 +143,7 @@ describe("Kiro hooks", () => {
     test("handles malformed input without crashing", () => {
       const result = runHook("posttooluse.mjs", {
         hook_event_name: "postToolUse",
-      });
+      }, tempDir);
 
       expect(result.exitCode).toBe(0);
     });
