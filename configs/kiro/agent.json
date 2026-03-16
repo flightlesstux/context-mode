@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "preToolUse": [
+      {
+        "matcher": "*",
+        "command": "context-mode hook kiro pretooluse"
+      }
+    ],
+    "postToolUse": [
+      {
+        "matcher": "*",
+        "command": "context-mode hook kiro posttooluse"
+      }
+    ]
+  }
+}
